@@ -391,7 +391,7 @@ function load(){
 var S = load();
 function save(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){} }
 /* ---------- automatic results (hosted page only) ---------- */
-var SYNC=(DATA.sync && DATA.sync.url) ? DATA.sync : null, syncUi={err:null, busy:false};
+var SYNC=(DATA.sync && DATA.sync.url) ? DATA.sync : null, syncUi={err:null, busy:false, wait:30000, timer:null, restoring:false, token:0};
 function hashParam(n){ var m=(location.hash||"").match(new RegExp("[#&]"+n+"=([^&]*)")); if(!m) return null; try{ return decodeURIComponent(m[1]); }catch(e){ return null; } }
 function syncKey(){ var h=hashParam("k"); if(h && /^[A-Za-z0-9_\-]{10,64}$/.test(h)){ try{ localStorage.setItem("nep-key", h); }catch(e){} return h; } try{ return localStorage.getItem("nep-key")||""; }catch(e){ return ""; } }
 function deviceId(){ try{ var d=localStorage.getItem("nep-dev"); if(!d){ d="ipad-"+Math.random().toString(36).slice(2,8); localStorage.setItem("nep-dev", d); } return d; }catch(e){ return "device"; } }
@@ -403,18 +403,48 @@ function syncSend(ev, sum){
 function syncFlush(){
   if(!SYNC || !S.unsent || syncUi.busy) return; var k=syncKey(); if(!k) return;
   var rep=reportText(), i=rep.indexOf("NEP1;"), code=i>=0?rep.slice(i).split("\n")[0]:"", u=S.unsent;
-  syncUi.busy=true;
-  fetch(SYNC.url, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({k:k, ev:u.ev, dev:deviceId(), sum:u.sum, rep:rep, code:code})})
+  syncUi.busy=true; if(syncUi.timer){ clearTimeout(syncUi.timer); syncUi.timer=null; }
+  var ac=(typeof AbortController!=="undefined")?new AbortController():null, to=setTimeout(function(){ if(ac) ac.abort(); }, 20000), ok=false;
+  fetch(SYNC.url, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify({k:k, ev:u.ev, dev:deviceId(), sum:u.sum, rep:rep, code:code}), signal:ac?ac.signal:undefined})
     .then(function(r){ return r.json(); })
-    .then(function(j){ syncUi.busy=false; if(j && j.ok){ if(S.unsent && S.unsent.t===u.t) S.unsent=null; S.lastSync=Date.now(); syncUi.err=null; save(); } else { syncUi.err=(j && j.err)||"error"; } syncLine(); if(S.unsent && S.unsent.t!==u.t) syncFlush(); })
-    .catch(function(){ syncUi.busy=false; syncUi.err="offline"; syncLine(); });
+    .then(function(j){ if(j && j.ok){ ok=true; if(S.unsent && S.unsent.t===u.t) S.unsent=null; S.lastSync=Date.now(); syncUi.err=null; syncUi.wait=30000; save(); } else { syncUi.err=(j && j.err)||"error"; } })
+    .catch(function(){ syncUi.err="offline"; })
+    .then(function(){
+      clearTimeout(to); syncUi.busy=false; syncLine();
+      if(S.unsent && ok) syncFlush(); // a newer finish arrived while this one was sending
+      else if(S.unsent && syncUi.err!=="key"){ syncUi.timer=setTimeout(syncFlush, syncUi.wait); syncUi.wait=Math.min(syncUi.wait*2, 600000); }
+    });
+}
+window.addEventListener("online", function(){ syncUi.wait=30000; syncFlush(); });
+// several devices' codes -> one code: per section, round or round list keep the record with the newest finish time;
+// fixed-question lists are combined
+function mergeCodes(codes){
+  var best={}, order=[], rf={};
+  codes.forEach(function(c){
+    var i=String(c||"").indexOf("NEP1;"); if(i<0) return;
+    String(c).slice(i+5).split(";").forEach(function(e){
+      if(!e) return;
+      if(e.indexOf("RF|")===0){ e.slice(3).split(",").forEach(function(x){ var j=x.indexOf("~"); if(j>0 && !rf[x.slice(0,j)]) rf[x.slice(0,j)]=x.slice(j+1); }); return; }
+      var f=e.split("|"), key=f[0], tm=/^[RX]M/.test(key)?0:(parseInt(f[5]||"",36)||0);
+      if(!(key in best)){ order.push(key); best[key]={e:e, t:tm}; }
+      else if(tm>best[key].t) best[key]={e:e, t:tm};
+    });
+  });
+  var parts=order.map(function(k){ return best[k].e; }), rk=Object.keys(rf);
+  if(rk.length) parts.push("RF|"+rk.map(function(k){ return k+"~"+rf[k]; }).join(","));
+  return parts.length ? "NEP1;"+parts.join(";") : "";
 }
 function syncRestore(manual){
   if(!SYNC){ return Promise.resolve(null); } var k=syncKey(); if(!k) return Promise.resolve({err:"nokey"});
+  var tok=++syncUi.token, before=JSON.stringify(Object.keys(S.s));
+  if(!manual) syncUi.autoBefore=before;
   return fetch(SYNC.url+"?k="+encodeURIComponent(k)).then(function(r){ return r.json(); }).then(function(j){
     if(!j || !j.ok) return {err:(j && j.err)||"error"};
-    var added=0; (j.codes||[]).forEach(function(c){ var rr=restoreFrom(c); if(rr && !rr.err) added+=(rr.added||0)+(rr.rounds||0); });
-    return {added:added};
+    if(tok <= (syncUi.cancel||0)) return {err:"cancelled"};
+    if(!manual && (S.resetAt || JSON.stringify(Object.keys(S.s))!==syncUi.autoBefore)) return {err:"cancelled"}; // something was started or cleared meanwhile
+    var merged=mergeCodes(j.codes||[]); if(!merged) return {added:0};
+    var rr=restoreFrom(merged);
+    return {added:(rr && !rr.err)?((rr.added||0)+(rr.rounds||0)+(rr.fixed||0)):0};
   }).catch(function(){ return {err:"offline"}; });
 }
 function syncStatusHtml(){
@@ -424,6 +454,7 @@ function syncStatusHtml(){
   if(S.unsent) return '<p class="warnline" id="syncline" style="margin-top:8px">Not sent to Dad yet'+(syncUi.err==="offline"?' (no internet)':'')+'. It sends by itself when you are back online.</p>';
   return '<p class="pace-msg" id="syncline" style="margin-top:8px">✓ Your results go to Dad automatically.'+(when?' Last sent '+esc(when)+'.':'')+'</p>';
 }
+function toDad(){ return (SYNC && syncKey()) ? 'Your results go to Dad automatically.' : 'Copy your report below and send it to Dad.'; }
 function syncLine(){ var el=document.getElementById("syncline"); if(el){ var tmp=document.createElement("div"); tmp.innerHTML=syncStatusHtml(); if(tmp.firstChild) el.replaceWith(tmp.firstChild); } }
 var view = {name:"home"};
 var ui = {paused:false, confirmFinish:false, confirmRedo:false, confirmReset:false, ptab:"q", copyText:null};
@@ -736,6 +767,8 @@ function reportText(){
     var X=buildRedoDay(iso,k[2]); if(!X || !SUBS.some(function(s){ return X[s].questions.length; })) return;
     code.push(k[1]+iso.replace(/-/g,"")+"|"+SUBS.map(function(s){ return X[s].questions.map(function(q){ return q.id; }).join("."); }).join("|"));
   }); });
+  var rfk=Object.keys(S.rf||{}).filter(function(id){ return /^[A-Za-z0-9-]+$/.test(id); });
+  if(rfk.length) code.push("RF|"+rfk.map(function(id){ return id+"~"+String(S.rf[id]).replace(/-/g,""); }).join(","));
   if(code.length){ var rc=retiredCount(); lines.push("Still to fix across all days: "+stillToFix()+(rc?" · retired after two misses in rounds: "+rc:"")); }
   var rv=revisitList();
   if(rv.length){ lines.push(""); lines.push("Top topics to revisit: "+rv.map(function(x){ return SUBNAME[x.sub]+": "+x.topic+" ("+x.w+" of "+x.t+" wrong)"; }).join("; ")); }
@@ -800,6 +833,7 @@ function renderHome(){
   h+='<header class="hero"><div class="eyebrow">New Entrant Day · Friday 13 November</div>'
     +'<h1>Naomi’s prep</h1>'
     +'<p class="lede">Monday, Wednesday and Friday: about 45 minutes. Tuesday and Thursday: about 1 hour. Saturday and Sunday: about 2 hours, a mini mock of all three tests. Every session ends with a mistakes round. The button below always starts today’s next set; if you miss a day, those sets move to your next session. Every timer is a guide: finish the questions even if it runs over. Rest on Thursday 12 November.</p>'
+    +(SYNC && syncUi.restoring ? '<p class="pace-msg" role="status" style="margin-top:12px"><b>Getting your progress from your backup…</b></p>' : '')
     +sessionSteps()
     +'<div class="hero-row">'+countHtml+cta+'</div></header>';
 
@@ -1075,16 +1109,16 @@ function renderResults(d,sub){
   var doneSubs = dsubs;
   if(isSet ? !!(st && st.done) : (doneSubs[doneSubs.length-1]===sub && doneSubs.every(function(x){ var y=sec(d,x); return y && y.done; }))){
     var vt, vb='';
-    if(dayData(d).extra) vt='Mistakes round done.'+(upNext().done?' That is today’s practice finished.':'')+' Copy your report below and send it to Dad.';
+    if(dayData(d).extra) vt='Mistakes round done.'+(upNext().done?' That is today’s practice finished.':'')+' '+toDad();
     else if(dayData(d).kind==="redo") vt='Today’s redo is done. New sets are unlocked.';
-    else if(dayData(d).stats && isStatsNight(isoDay())) vt='That is your stats revision done. No mistakes round tonight: read the working for anything you missed, then get some sleep. Good luck in your test tomorrow! Copy your report below and send it to Dad.';
+    else if(dayData(d).stats && isStatsNight(isoDay())) vt='That is your stats revision done. No mistakes round tonight: read the working for anything you missed, then get some sleep. Good luck in your test tomorrow! '+toDad();
     else if(isSet && inSess && U0.n) vt='That is '+esc(secName(d,sub))+' done. Next: '+esc(secName(U0.n.d,U0.n.sub))+'.';
     else if(isSet && inSess && U0.done){
       var xr=roundState();
       if(xr.waiting){ vt='That is today’s sets done. Now your mistakes round (about '+roundMinutes(isoDay())+' minutes), then you are finished for today.'; vb='<div class="btnrow"><button class="btn subc" data-sub="reasoning" data-act="extra">Start my mistakes round →</button></div>'; }
       else if(xr.next){ vt='That is today’s sets done. Now finish your mistakes round.'; vb='<div class="btnrow"><button class="btn subc" data-sub="'+xr.next+'" data-act="open" data-day="'+xr.day+'">'+(sec(xr.day,xr.next)?'Continue':'Start')+' mistakes round: '+SUBNAME[xr.next]+' →</button></div>'; }
-      else vt='That is today’s practice done. Copy your report below and send it to Dad.';
-    } else vt='That is '+esc(dlabel(d))+' finished. Copy your report below and send it to Dad.';
+      else vt='That is today’s practice done. '+toDad();
+    } else vt='That is '+esc(dlabel(d))+' finished. '+toDad();
     h+='<p class="verdict" style="font-size:16px">'+vt+'</p>'+vb;
   }
   h+=paceHtml(false);
@@ -1192,8 +1226,14 @@ function restoreFrom(text, at){
   var code=t.slice(i+5).replace(/\s+/g,""), added=0, kept=0, replaced=0, bad=0, rounds=0, ago=at||(Date.now()-86400000);
   code=(code.match(/^[A-Za-z0-9\-|\/:,;%.!~*'()_]*/)||[""])[0];
   code.split(";").forEach(function(e){ if(/^[RX]M\d{8}\|/.test(e)){ var r1=restoreMembership(e); if(r1<0) bad++; else rounds+=r1; } });
+  var fixedAdded=0;
   code.split(";").forEach(function(e){
-    if(!e || /^[RX]M/.test(e)) return;
+    if(e.indexOf("RF|")!==0) return;
+    S.rf=S.rf||{};
+    e.slice(3).split(",").forEach(function(x){ var m=x.match(/^([A-Za-z0-9-]+)~(\d{4})(\d\d)(\d\d)$/); if(m && !S.rf[m[1]]){ S.rf[m[1]]=m[2]+"-"+m[3]+"-"+m[4]; fixedAdded++; } });
+  });
+  code.split(";").forEach(function(e){
+    if(!e || /^[RX]M/.test(e) || e.indexOf("RF|")===0) return;
     if(e.charAt(0)==="R" || e.charAt(0)==="X"){ var r0=restoreRound(e, ago); if(r0===1) added++; else if(r0===2) kept++; return; }
     var f=e.split("|"); if(f.length<5){ bad++; return; }
     var k=f[0].indexOf("-"), d=+f[0].slice(0,k), sub=f[0].slice(k+1);
@@ -1215,7 +1255,7 @@ function restoreFrom(text, at){
     S.s[skey(d,sub)]={a:a, chk:chk, el:Math.max(0,+f[2]||0), done:true, mode:(f[3]==="t"?"test":"instant"), startedAt:fin, finishedAt:fin, restored:true};
     added++;
   });
-  if(!added && !rounds) return {err: kept ? "Everything in that code is already on this device." : "That code has no finished sections in it. Check you copied the whole line."};
+  if(!added && !rounds && !fixedAdded) return {err: kept ? "Everything in that code is already on this device." : "That code has no finished sections in it. Check you copied the whole line."};
   var today=isoDay();
   if(today>=REDO_START && S.rq && S.rq[today]){
     var pm=pendingMisses(today), RQ=S.rq[today], rid=redoDayId(today), RX=(S.rx&&S.rx[today])||{};
@@ -1223,7 +1263,8 @@ function restoreFrom(text, at){
     S.rq[today]=capRedo(avail, today, RQ);
   }
   save();
-  return {added:added, kept:kept, replaced:replaced, bad:bad, rounds:rounds};
+  if(fixedAdded && !added && !rounds) save();
+  return {added:added, kept:kept, replaced:replaced, bad:bad, rounds:rounds, fixed:fixedAdded};
 }
 var QDAYM=null;
 function qDay(id){ if(!QDAYM){ QDAYM={}; DATA.days.forEach(function(x){ SUBS.forEach(function(sub){ ((x[sub]&&x[sub].questions)||[]).forEach(function(q){ QDAYM[q.id]=x.day; }); }); }); } return QDAYM[id]; }
@@ -1359,6 +1400,7 @@ function extraHtml(X,waiting,all){
   return '<div class="xoffer"><p class="pace-msg">After your set, do one round of questions you got wrong before: '+waiting+' question'+(waiting===1?'':'s')+' today'+(more?' (you have '+(all||waiting)+' to fix altogether)':'')+'. Get one right and it is gone. Miss one twice in these rounds and it stops coming back; read its working instead.</p><button class="btn subc" data-sub="reasoning" data-act="extra">Start my mistakes round</button></div>';
 }
 function openSection(d,sub){
+  if(SYNC && syncUi.restoring){ toast("One moment: getting your progress from your backup"); return; }
   var st=sec(d,sub);
   ui.mode=null;
   var dd0=dayData(d); if(!dd0 || !has(d,sub)){ go({name:"home"}); return; }
@@ -1449,7 +1491,7 @@ app.addEventListener("click",function(e){
     case "redo-yes": delete S.s[skey(view.day,view.sub)]; save(); ui.mode=null; go({name:"intro", day:view.day, sub:view.sub}); break;
     case "reset": ui.confirmReset=true; render(); break;
     case "reset-no": ui.confirmReset=false; render(); break;
-    case "reset-yes": S={s:{}, w:{}, rq:{}, rf:{}, rx:{}, plog:{}, seeded:S.seeded||{}, unsent:null, lastSync:S.lastSync||null, resetAt:Date.now()}; save(); go({name:"home"}); toast("Progress cleared"); break;
+    case "reset-yes": if(SYNC){ syncUi.cancel=syncUi.token; syncUi.restoring=false; } S={s:{}, w:{}, rq:{}, rf:{}, rx:{}, plog:{}, seeded:S.seeded||{}, unsent:null, lastSync:S.lastSync||null, resetAt:Date.now()}; save(); go({name:"home"}); toast("Progress cleared"); break;
     case "copy-report": copy(reportText(), "Copied. Now paste it into a message to Dad."); break;
     case "extra":
       var xr=todayRedo(); if(xr && xr.subs.length && !xr.complete){ ui.flash="Do today’s redo first. New sets unlock when it is done."; go({name:"home"}); break; }
@@ -1559,8 +1601,15 @@ if(SYNC){
     try{ history.replaceState(null, "", location.pathname+location.search+(syncKey()?"#k="+encodeURIComponent(syncKey()):"")); }catch(e){}
     if(ri && !ri.err){ toast("Your progress is here now"); render(); }
     syncSend("Moved to the new page", (ri&&ri.added?ri.added:0)+" sections brought over");
-  } else if(syncKey() && !S.resetAt && !Object.keys(S.s).some(function(k){ return S.s[k] && S.s[k].done; })){ // a wiped device, not one cleared on purpose
-    syncRestore(false).then(function(r){ if(r && r.added){ toast("Your progress was restored from your backup"); render(); } });
+  } else if(syncKey() && !S.resetAt && !Object.keys(S.s).length){ // a wiped device (nothing at all saved here), not one cleared on purpose
+    syncUi.restoring=true; render();
+    var giveUp=setTimeout(function(){ if(syncUi.restoring){ syncUi.restoring=false; syncUi.cancel=syncUi.token; render(); toast("Could not reach your backup. Use Restore from my backup later."); } }, 10000);
+    syncRestore(false).then(function(r){
+      clearTimeout(giveUp); var was=syncUi.restoring; syncUi.restoring=false;
+      if(r && r.added){ toast("Your progress was restored from your backup"); }
+      else if(was && r && r.err && r.err!=="cancelled"){ toast("Could not reach your backup. Use Restore from my backup later."); }
+      render();
+    });
   }
   syncFlush();
   window.addEventListener("hashchange", function(){ if(syncKey() && view.name==="home") render(); syncFlush(); });
