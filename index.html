@@ -1,4 +1,4 @@
-<title>Naomi's New Entrant Prep</title>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>html,body{margin:0}</style><title>Naomi's New Entrant Prep</title>
 <meta name="robots" content="noindex,nofollow">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1075,10 +1075,11 @@ function updateRunner(){
   if(st.mode==="instant" && !checked) h+='<button class="btn subc" data-act="check"'+(answered(q,v)?"":" disabled")+'>Check</button>';
   if(!last) h+='<button class="btn '+(st.mode==="instant"&&!checked?"quiet":"subc")+'" data-act="next">Next →</button>';
   h+='</div><div class="grp">';
-  if(ui.confirmFinish && un>0) h+='<span class="warnline">'+un+' unanswered. Finish anyway?</span><button class="btn primary" data-act="finish-yes">Finish and mark</button><button class="btn quiet" data-act="finish-no">Keep going</button>';
+  if(ui.confirmFinish && un>0) h+='<span class="warnline">'+un+' question'+(un===1?'':'s')+' not answered yet.</span><button class="btn quiet" data-act="finish-yes" disabled data-armed="'+(Date.now()+1500)+'">Finish anyway</button><button class="btn primary" data-act="finish-no">Keep going</button>';
   else h+='<button class="btn '+(last?"primary":"quiet")+'" data-act="finish">Finish and mark</button>';
   h+='</div></div>';
   card.innerHTML=h;
+  var fy=card.querySelector('[data-act="finish-yes"][disabled]'); if(fy){ setTimeout(function(){ if(fy.isConnected) fy.disabled=false; }, Math.max(0, +fy.getAttribute("data-armed")-Date.now())); }
   var rn2=document.getElementById("runner"); if(rn2) rn2.classList.remove("is-paused");
   updateTimer();
 }
@@ -1088,6 +1089,7 @@ function dd0x(d){ var x=dayData(d); return !!(x && x.extra); }
 function renderResults(d,sub){
   var dd=dayData(d)[sub], list=dd.questions, st=sec(d,sub), sc=scoreOf(d,sub), p=sc.c/sc.t;
   var verdict = p>=0.9?"Excellent. This level is comfortable for you.":p>=0.8?"Strong result. Check the ones you missed below.":p>=0.6?"Getting there. Go through each explanation for the misses.":(dayData(d).kind==="redo"?"Tough set. Read the working for each miss; they will come back in a later round.":(dayData(d).stats && isStatsNight(isoDay()))?"Tough set. Read the working for each miss tonight, then rest for tomorrow’s test.":dayData(d).set?"Tough set. Read the working for each miss, then follow today’s next step.":"Tough set. Read the working for each miss, then try the section again tomorrow.");
+  if(dayData(d).kind!=="redo" && list.some(function(q){ return !answered(q, st.a[q.id]); })) verdict="Some questions have no answer yet. If you pressed Finish by mistake, tap the carry on button below.";
   var idx=SUBS.indexOf(sub), oi=ORDER.indexOf(d), nxt;
   var dsubs=subsOf(d).filter(function(x){ return !dayData(d)[x].optional; }), ri=dsubs.indexOf(sub);
   var notDone=function(dd,x){ var y=sec(dd,x); return !(y && y.done); };
@@ -1104,6 +1106,7 @@ function renderResults(d,sub){
     +(nxt && isSet && dayData(d).kind==="mock" ? '<p class="pace-msg" style="margin-top:12px">Nice work. Take a 5-minute break now: stand up, stretch, get a drink of water. Then start '+esc(secName(nxt.d,nxt.sub))+'.</p>' : '')
     +'<div class="btnrow">'+(nxt?'<button class="btn subc" data-act="open" data-day="'+nxt.d+'" data-sub="'+nxt.sub+'">Next: '+esc(secName(nxt.d,nxt.sub))+' →</button>':'')
     +(sub==="english"&&dd.writing?'<button class="btn quiet" data-act="writing" data-day="'+d+'">Writing task</button>':'')
+    +((dayData(d).kind!=="redo" && list.some(function(q){ return !answered(q, st.a[q.id]); }))?'<button class="btn '+(dayData(d).kind==="mock"?'quiet':'primary')+'" data-act="unfinish">I pressed Finish by mistake: carry on</button>':'')
     +(dayData(d).kind==="redo"?'':(ui.confirmRedo?'<span class="warnline">Clear this section’s answers?</span><button class="btn danger" data-act="redo-yes">Yes, start again</button><button class="btn quiet" data-act="redo-no">Keep</button>':'<button class="btn quiet" data-act="redo">Try this section again</button>'))
     +'</div></section>';
   var doneSubs = dsubs;
@@ -1127,7 +1130,9 @@ function renderResults(d,sub){
   list.forEach(function(q){ if(!map[q.topic]){ map[q.topic]={c:0,t:0}; order.push(q.topic);} map[q.topic].t++; if(correct(q,st.a[q.id])) map[q.topic].c++; });
   h+='<section class="panel"><div class="panel-head"><h2>By topic</h2></div><div class="tb">'+order.map(function(t){ var m=map[t]; return '<div class="row"><span>'+esc(t)+'</span><span class="meter"><i style="width:'+Math.round(m.c/m.t*100)+'%"></i></span><span class="n">'+m.c+'/'+m.t+'</span></div>'; }).join("")+'</div></section>';
   if(sub==="english") h+='<details class="pref"><summary>Show the '+(dd.passages.length>1?'texts':'passage')+': '+dd.passages.map(function(x){return esc(x.title);}).join(" · ")+'</summary>'+dd.passages.map(renderPassage).join("")+'</details>';
-  h+='<section><h2 style="font-size:24px;margin-bottom:14px">Review</h2><ol class="rv">';
+  var hideRv=dayData(d).kind!=="redo" && list.some(function(q){ return !answered(q, st.a[q.id]); });
+  h+=hideRv?'<details class="pref"><summary>Show the answers and working</summary><p class="warnline" style="margin:8px 0">If you pressed Finish by mistake, use the carry on button at the top instead: the answers are hidden so you can still have a fair go.</p><ol class="rv">'
+    :'<section><h2 style="font-size:24px;margin-bottom:14px">Review</h2><ol class="rv">';
   list.forEach(function(q,i){
     var v=st.a[q.id], ok=correct(q,v), your;
     if(!answered(q,v)) your='<em>No answer</em>';
@@ -1142,7 +1147,7 @@ function renderResults(d,sub){
         :'<div class="ra"><div><span class="lab">Your answer</span>'+your+'</div>'+(ok?'':'<div><span class="lab">Correct</span>'+corr+'</div>')+'</div>')
       +'<div class="ex">'+q.explain+'</div></li>';
   });
-  h+='</ol></section></div></div>';
+  h+='</ol>'+(hideRv?'</details>':'</section>')+'</div></div>';
   return h;
 }
 
@@ -1239,6 +1244,7 @@ function restoreFrom(text, at){
     var k=f[0].indexOf("-"), d=+f[0].slice(0,k), sub=f[0].slice(k+1);
     if(k<1 || !BYID[d] || BYID[d].kind==="redo" || SUBS.indexOf(sub)<0 || !has(d,sub)){ bad++; return; }
     var cur=sec(d,sub); if(cur && cur.done){ kept++; return; }
+    if(cur && cur.reopenedAt && tparse(f[5], ago)<=cur.reopenedAt){ kept++; return; } // she reopened it after that result: keep her new answers
     if(cur) replaced++;
     var miss={};
     String(f[4]||"").split(",").forEach(function(m){ var j=m.indexOf(":"); if(j<1) return; var v=m.slice(j+1); try{ v=decodeURIComponent(v); }catch(x){} miss[m.slice(0,j)]=v; });
@@ -1421,7 +1427,7 @@ function openSection(d,sub){
 function finish(){
   var st=sec(view.day,view.sub);
   qs(view.day,view.sub).forEach(function(q){ st.chk[q.id]=1; });
-  st.done=true; st.finishedAt=Date.now();
+  st.done=true; st.finishedAt=Date.now(); delete st.reopenedAt;
   var fd=dayData(view.day);
   if(fd && fd.kind==="redo"){ S.rf=S.rf||{}; qs(view.day,view.sub).forEach(function(q){ if(correct(q,st.a[q.id])) S.rf[q.id]=isoDay(); }); }
   save();
@@ -1469,6 +1475,7 @@ app.addEventListener("click",function(e){
       ui.ptab = view.sub==="english" ? "p":"q";
       go({name:"runner", day:view.day, sub:view.sub, qi:0}); break;
     case "pick":
+      if(Date.now()<(ui.quietUntil||0)) break;
       var st=sec(view.day,view.sub), q=qs(view.day,view.sub)[view.qi];
       if(st.chk[q.id]) return;
       st.a[q.id]=+b.getAttribute("data-i"); save(); ui.confirmFinish=false; updateRunner(); break;
@@ -1482,12 +1489,22 @@ app.addEventListener("click",function(e){
     case "finish":
       var st3=sec(view.day,view.sub), un=qs(view.day,view.sub).filter(function(x){return !answered(x, st3.a[x.id]);}).length;
       if(un>0){ ui.confirmFinish=true; updateRunner(); } else finish(); break;
-    case "finish-yes": finish(); break;
+    case "finish-yes": if(Date.now() < +(b.getAttribute("data-armed")||0)) break; finish(); break;
     case "finish-no": ui.confirmFinish=false; updateRunner(); break;
     case "pause": ui.paused=!ui.paused; save(); var pb=document.querySelector('[data-act="pause"]'); if(pb && pb.closest(".clock")) pb.textContent=ui.paused?"Resume":"Pause"; updateRunner(); break;
     case "ptab": ui.ptab=b.getAttribute("data-tab"); var rn=document.getElementById("runner"); rn.classList.remove("show-p","show-q"); rn.classList.add("show-"+ui.ptab); document.querySelectorAll(".ptabs button").forEach(function(x){ x.setAttribute("aria-pressed", String(x.getAttribute("data-tab")===ui.ptab)); }); break;
     case "redo": ui.confirmRedo=true; render(); break;
     case "redo-no": ui.confirmRedo=false; render(); break;
+    case "unfinish":
+      var su=sec(view.day,view.sub); if(!su || !su.done || dayData(view.day).kind==="redo") break;
+      var ncU={}; if(su.mode!=="test") qs(view.day,view.sub).forEach(function(q){ if(answered(q, su.a[q.id])) ncU[q.id]=1; });
+      su.done=false; delete su.finishedAt; delete su.restored; su.chk=ncU; su.reopenedAt=Date.now();
+      var xI=isoDay(), xR=extraDayId(xI); if(S.rx && S.rx[xI] && !SUBS.some(function(x){ return sec(xR,x); })) delete S.rx[xI]; // rebuild today's unstarted round without the blanks
+      save(); ui.quietUntil=Date.now()+700;
+      var nmU=secName(view.day,view.sub), lU=qs(view.day,view.sub), qU=0; for(var iU=0;iU<lU.length;iU++){ if(!answered(lU[iU], su.a[lU[iU].id])){ qU=iU; break; } }
+      syncSend("Carried on with "+nmU, nmU+": pressed Finish by mistake, reopened with her answers kept");
+      ui.ptab="q"; go({name:"runner", day:view.day, sub:view.sub, qi:qU});
+      break;
     case "redo-yes": delete S.s[skey(view.day,view.sub)]; save(); ui.mode=null; go({name:"intro", day:view.day, sub:view.sub}); break;
     case "reset": ui.confirmReset=true; render(); break;
     case "reset-no": ui.confirmReset=false; render(); break;
