@@ -434,14 +434,16 @@ function mergeCodes(codes){
   if(rk.length) parts.push("RF|"+rk.map(function(k){ return k+"~"+rf[k]; }).join(","));
   return parts.length ? "NEP1;"+parts.join(";") : "";
 }
-function syncRestore(manual){
+function syncRestore(manual, bg){
   if(!SYNC){ return Promise.resolve(null); } var k=syncKey(); if(!k) return Promise.resolve({err:"nokey"});
   var tok=++syncUi.token, before=JSON.stringify(Object.keys(S.s));
   if(!manual) syncUi.autoBefore=before;
-  return fetch(SYNC.url+"?k="+encodeURIComponent(k)).then(function(r){ return r.json(); }).then(function(j){
+  var ac=(typeof AbortController!=="undefined")?new AbortController():null; setTimeout(function(){ if(ac) ac.abort(); }, 20000);
+  return fetch(SYNC.url+"?k="+encodeURIComponent(k), ac?{signal:ac.signal}:undefined).then(function(r){ return r.json(); }).then(function(j){
     if(!j || !j.ok) return {err:(j && j.err)||"error"};
     if(tok <= (syncUi.cancel||0)) return {err:"cancelled"};
     if(!manual && (S.resetAt || JSON.stringify(Object.keys(S.s))!==syncUi.autoBefore)) return {err:"cancelled"}; // something was started or cleared meanwhile
+    if(bg && view.name!=="home") return {err:"cancelled"}; // never change progress under a set she is doing
     var merged=mergeCodes(j.codes||[]); if(!merged) return {added:0};
     var rr=restoreFrom(merged);
     return {added:(rr && !rr.err)?((rr.added||0)+(rr.rounds||0)+(rr.fixed||0)):0};
@@ -629,6 +631,43 @@ function upNext(){
   return {it:it, done:true, parts:parts};
 }
 function todayNext(){ var u=upNext(); return u.n||null; }
+// minutes she actually worked today (every section finished today, mistakes rounds included, on any device)
+function workedMin(iso){ var t=0; Object.keys(S.s||{}).forEach(function(k){ var st=S.s[k]; if(st && st.done && st.finishedAt && isoDay(st.finishedAt)===iso) t+=(+st.el||0); }); return Math.round(t/60); }
+// working time a session is meant to fill (2-hour sessions leave room for three short breaks)
+function sessionWorkMin(it){ return it.total>=120 ? it.total-15 : it.total; }
+var EXTRA_MIN=10;
+// extra time: once today's sets and mistakes round are done early, the next unfinished set (subjects in turn,
+// the ones not practised today first), until her real working time reaches the session length
+function extraSet(){
+  var iso=isoNow(), u=upNext(); if(!u.it || !u.done) return null;
+  var xr=roundState(); if(xr.next || xr.waiting) return null;
+  var Q=(DATA.plan&&DATA.plan.queues)||{}, SUBQ=["maths","english","reasoning"], planned={}, i, j;
+  (u.parts||[]).forEach(function(p){ planned[skey(p.d,p.sub)]=1; });
+  var extra=function(e){ return !!BYID[e[0]] && has(e[0],e[1]) && !planned[skey(e[0],e[1])]; };
+  // an extra set started today and not finished is carried on, whatever the time
+  for(i=0;i<SUBQ.length;i++){ var L0=Q[SUBQ[i]]||[]; for(j=0;j<L0.length;j++){ var e0=L0[j], s0=sec(e0[0],e0[1]); if(extra(e0) && s0 && ((!s0.done && s0.startedAt && isoDay(s0.startedAt)===iso) || (blankHeavy(e0[0],e0[1]) && secDoneOn(e0[0],e0[1],iso)))) return {d:e0[0], sub:e0[1], left:sessionWorkMin(u.it)-workedMin(iso)}; } }
+  var left=sessionWorkMin(u.it)-workedMin(iso); if(left<EXTRA_MIN) return null;
+  var inPlan=SUBQ.filter(function(s){ return (u.parts||[]).some(function(p){ return p.sub===s; }); });
+  var order=SUBQ.filter(function(s){ return inPlan.indexOf(s)<0; }).concat(inPlan), g=0;
+  SUBQ.forEach(function(s){ (Q[s]||[]).forEach(function(e){ if(extra(e) && secDoneOn(e[0],e[1],iso) && !blankHeavy(e[0],e[1])) g++; }); });
+  for(i=0;i<order.length;i++){
+    var L=Q[order[(g+i)%order.length]]||[];
+    for(j=0;j<L.length;j++){ if(extra(L[j]) && needsWork(L[j][0],L[j][1])) return {d:L[j][0], sub:L[j][1], left:left}; }
+  }
+  return null;
+}
+function extrasDoneToday(parts){
+  var iso=isoNow(), Q=(DATA.plan&&DATA.plan.queues)||{}, planned={}, out=[];
+  (parts||[]).forEach(function(p){ planned[skey(p.d,p.sub)]=1; });
+  ["maths","english","reasoning"].forEach(function(s){ (Q[s]||[]).forEach(function(e){ if(BYID[e[0]] && !planned[skey(e[0],e[1])] && secDoneOn(e[0],e[1],iso) && !blankHeavy(e[0],e[1])) out.push(secName(e[0],e[1])); }); });
+  return out;
+}
+function extraBox(ex){
+  var started=!!sec(ex.d,ex.sub);
+  return '<div class="cu-box"><b>'+(started?'Extra time: carry on with '+esc(secName(ex.d,ex.sub))+'.':'Today’s sets and mistakes round are done, with about '+Math.max(ex.left,EXTRA_MIN)+' minutes of your session left.')+'</b> '
+    +(started?'':'Keep going with the next set: the button below starts it. ')
+    +'Anything you get wrong goes into your next mistakes round. The button says “Done for today” once your session time is used.</div>';
+}
 function roundState(){ // today's mistakes round: the next unfinished subject, or how many are waiting if none started
   var iso=isoDay(); if(iso<REDO_START || iso>=REDO_END) return {};
   capRound(iso);
@@ -828,6 +867,8 @@ function renderHome(){
         if(u.all || u.done){ var xr=roundState();
           if(xr.next) return '<button class="btn primary" data-act="open" data-day="'+xr.day+'" data-sub="'+xr.next+'">'+(sec(xr.day,xr.next)?'Continue':'Start')+' mistakes round: '+SUBNAME[xr.next]+' <span aria-hidden="true">→</span></button>';
           if(xr.waiting) return '<button class="btn primary" data-act="extra">Start my mistakes round <span aria-hidden="true">→</span></button>';
+          var ex=extraSet();
+          if(ex) return '<button class="btn primary" data-act="'+(blankHeavy(ex.d,ex.sub)?'resume':'open')+'" data-day="'+ex.d+'" data-sub="'+ex.sub+'">'+(sec(ex.d,ex.sub)?'Continue':'Keep going')+': '+esc(secName(ex.d,ex.sub))+' <span aria-hidden="true">→</span></button>';
           if(u.done) return '<span class="chip" data-sub="reasoning">Done for today</span>'; }
         return '<span class="chip" data-sub="reasoning">'+(u.rest?'Rest day: no practice today':u.over?'All the practice is done':u.none?'No session planned today':u.done?'Done for today':'Every set done')+'</span>'; })();
 
@@ -839,9 +880,10 @@ function renderHome(){
   }
   h+='<header class="hero"><div class="eyebrow">New Entrant Day · Friday 13 November</div>'
     +'<h1>Naomi’s prep</h1>'
-    +'<p class="lede">Monday, Wednesday and Friday: about 45 minutes. Tuesday and Thursday: about 1 hour. Saturday and Sunday: about 2 hours (this weekend: the catch-up sets on Saturday, a mini mock of all three tests on Sunday). Every session ends with a mistakes round. The button below always starts today’s next set; if you miss a day, those sets move to your next session. Every timer is a guide: finish the questions even if it runs over. Rest on Thursday 12 November.</p>'
+    +'<p class="lede">Monday, Wednesday and Friday: about 45 minutes. Tuesday and Thursday: about 1 hour. Saturday and Sunday: about 2 hours (this weekend: the catch-up sets on Saturday, a mini mock of all three tests on Sunday). Every session ends with a mistakes round. The button below always starts today’s next set; if you miss a day, those sets move to your next session. Every timer is a guide: finish the questions even if it runs over. If you finish early, keep going: the button gives you the next set until your session time is used. Rest on Thursday 12 November.</p>'
     +(SYNC && syncUi.restoring ? '<p class="pace-msg" role="status" style="margin-top:12px"><b>Getting your progress from your backup…</b></p>' : '')
     +sessionSteps()
+    +(function(){ if(nu) return ""; var ex=extraSet(); return ex?extraBox(ex):""; })()
     +'<div class="hero-row">'+countHtml+cta+'</div></header>';
 
   // plan: one session a day; today's row comes first, the sets in each row are picked from her progress
@@ -854,6 +896,7 @@ function renderHome(){
         body='Past session. Anything unfinished from this day has moved to your next sessions.';
       } else {
         body=esc(partsText(parts, it));
+        if(today){ var xd=extrasDoneToday(parts); if(xd.length) body+=esc(" Extra time today: "+xd.join(", ")+" done."); }
         var tot=parts.length, dn=parts.filter(function(p){ return !needsWork(p.d,p.sub); }).length, stt=parts.filter(function(p){ return sec(p.d,p.sub); }).length, mk=parts.length && parts[0].mock;
         pill=!tot?'':dn===tot?'<span class="pill done">Done</span>':stt?'<span class="pill prog">'+dn+' of '+tot+(mk?' tests':' sets')+'</span>':'<span class="pill">'+(mk?tot+' tests':tot===1?'1 set':tot+' sets')+'</span>';
       }
@@ -1251,7 +1294,7 @@ function restoreFrom(text, at){
     var k=f[0].indexOf("-"), d=+f[0].slice(0,k), sub=f[0].slice(k+1);
     if(k<1 || !BYID[d] || BYID[d].kind==="redo" || SUBS.indexOf(sub)<0 || !has(d,sub)){ bad++; return; }
     var cur=sec(d,sub); if(cur && cur.done){ kept++; return; }
-    if(cur && cur.reopenedAt && tparse(f[5], ago)<=cur.reopenedAt){ kept++; return; } // she reopened it after that result: keep her new answers
+    if(cur && tparse(f[5], ago)<=(cur.reopenedAt||cur.startedAt||0)){ kept++; return; } // she started or reopened it here after that result: keep her new answers
     if(cur) replaced++;
     var miss={};
     String(f[4]||"").split(",").forEach(function(m){ var j=m.indexOf(":"); if(j<1) return; var v=m.slice(j+1); try{ v=decodeURIComponent(v); }catch(x){} miss[m.slice(0,j)]=v; });
@@ -1359,7 +1402,11 @@ function extraPending(today){
   var inToday={}, tq=(DAILY_REDO&&S.rq&&S.rq[today])||{};
   SUBS.forEach(function(sub){ (tq[sub]||[]).forEach(function(r){ inToday[sub+"|"+r]=1; }); });
   var p=pendingMisses("9999-12-31"), o={};
-  SUBS.forEach(function(sub){ o[sub]=p[sub].filter(function(r){ return !inToday[sub+"|"+r]; }); });
+  SUBS.forEach(function(sub){
+    var L=p[sub].filter(function(r){ return !inToday[sub+"|"+r]; });
+    var fresh=function(r){ var k=String(r).indexOf(":"), st=sec(+String(r).slice(0,k), sub); return !!(st && st.finishedAt && isoDay(st.finishedAt)===today); };
+    o[sub]=L.filter(fresh).concat(L.filter(function(r){ return !fresh(r); })); // today's misses first, then the oldest
+  });
   return capRedo(o, today, null, roundBudget(today));
 }
 function capRound(iso){ var R0=S.rx&&S.rx[iso]; if(!R0) return; var rid=extraDayId(iso); if(SUBS.some(function(x){ return sec(rid,x); })) return; var B=roundBudget(iso); if(countRefs(R0)>B){ S.rx[iso]=capRedo(R0, iso, null, B); save(); } }
@@ -1475,7 +1522,20 @@ setInterval(function(){
     var we=document.getElementById("wtimer"); if(we) we.textContent=fmt(ui.wel);
   }
 },1000);
-document.addEventListener("visibilitychange",function(){ lastTick=Date.now(); if(document.hidden) save(); else syncFlush(); });
+document.addEventListener("visibilitychange",function(){ lastTick=Date.now(); if(document.hidden) save(); else { syncFlush(); if(pullOk() && view.name==="home" && Date.now()-(syncUi.pulledAt||0)>5*60000) bgPull(); } });
+// quietly bring in work sent from her other devices (finished sets, mistakes rounds, fixed questions)
+function bgPull(){
+  if(syncUi.pulling || syncUi.restoring) return; syncUi.pulling=true; syncUi.pulledAt=Date.now(); syncUi.pullAgain=false;
+  syncUi.restoring=true; if(view.name==="home") render();
+  var giveUp=setTimeout(function(){ if(syncUi.restoring){ syncUi.restoring=false; if(view.name==="home") render(); } }, 6000);
+  syncRestore(false, true).then(function(r){
+    clearTimeout(giveUp); syncUi.restoring=false; syncUi.pulling=false;
+    if(r && r.err==="cancelled") syncUi.pullAgain=true;
+    if(r && r.added) toast("Brought in your work from your other device");
+    if(view.name==="home") render();
+  });
+}
+function pullOk(){ return !!(SYNC && syncKey() && !S.resetAt); }
 window.addEventListener("resize",setStick);
 window.addEventListener("storage",function(e){ if(e.key===KEY && (view.name==="home")){ S=load(); render(); } });
 
@@ -1484,8 +1544,9 @@ app.addEventListener("click",function(e){
   var b=e.target.closest("[data-act]"); if(!b || b.disabled) return;
   var act=b.getAttribute("data-act");
   var d=+b.getAttribute("data-day"), sub=b.getAttribute("data-sub");
+  if(SYNC && syncUi.restoring && (act==="resume" || act==="extra" || act==="unfinish")){ toast("One moment: getting your progress from your backup"); return; }
   switch(act){
-    case "home": save(); go({name:"home"}); break;
+    case "home": save(); go({name:"home"}); if(syncUi.pullAgain && pullOk()) bgPull(); break;
     case "open": openSection(d,sub); break;
     case "mode": ui.mode=b.getAttribute("data-mode"); render(); break;
     case "start":
@@ -1532,7 +1593,7 @@ app.addEventListener("click",function(e){
       render(); break;
     case "restore-cloud":
       ui.restoreOpen=true; ui.restoreOk=true; ui.restoreMsg="Getting your backup…"; render();
-      syncRestore(true).then(function(r){ ui.restoreOk=!(r&&r.err); ui.restoreMsg=(r&&r.err)?(r.err==="offline"?"No internet: try again when you are online.":"The backup could not be read. Open the page from the link Dad emailed you."):(r.added?"Restored "+r.added+" item"+(r.added===1?"":"s")+" from your backup.":"Everything in your backup is already on this device."); render(); });
+      syncRestore(true).then(function(r){ ui.restoreOk=!(r&&r.err); if(r && !r.err && S.resetAt){ delete S.resetAt; save(); } ui.restoreMsg=(r&&r.err)?(r.err==="offline"?"No internet: try again when you are online.":"The backup could not be read. Open the page from the link Dad emailed you."):(r.added?"Restored "+r.added+" item"+(r.added===1?"":"s")+" from your backup.":"Everything in your backup is already on this device."); render(); });
       break;
     case "restore":
       var rbox=document.getElementById("restorebox"), rr=restoreFrom(rbox?rbox.value:"");
@@ -1639,6 +1700,7 @@ if(SYNC){
       render();
     });
   }
+  else if(pullOk()) bgPull();
   syncFlush();
   window.addEventListener("hashchange", function(){ if(syncKey() && view.name==="home") render(); syncFlush(); });
 }
